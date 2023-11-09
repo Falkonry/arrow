@@ -1,3 +1,10 @@
+### Build Notes
+- from inside the directory python/examples/minimal_build
+-   create a docker image using
+-     `docker build -t arrow_ubi -f Dockerfile-ubi .`
+- Run `docker run --rm -t -i -v $PWD:/io -v $PWD/../../..:/arrow arrow_ubi /io/build_venv.sh`
+  It will produce a whl file.
+
 <!---
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
