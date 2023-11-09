@@ -16,6 +16,7 @@
 // under the License.
 
 #include "arrow/filesystem/s3fs.h"
+#include "arrow/result.h"
 
 #include <algorithm>
 #include <atomic>
@@ -105,6 +106,7 @@ using internal::TaskGroup;
 using internal::ToChars;
 using internal::Uri;
 using io::internal::SubmitIO;
+using internal::GetEnvVarNative;
 
 namespace fs {
 
@@ -1155,6 +1157,7 @@ class ObjectInputFile final : public io::RandomAccessFile {
 // so I chose the safer value.
 // (see https://docs.aws.amazon.com/AmazonS3/latest/API/mpUploadUploadPart.html)
 static constexpr int64_t kMinimumPartUpload = 5 * 1024 * 1024;
+static constexpr int64_t kMultipartThreshold = 5 * 1024 * 1024;
 
 // An OutputStream that writes to a S3 object
 class ObjectOutputStream final : public io::OutputStream {
@@ -1179,6 +1182,24 @@ class ObjectOutputStream final : public io::OutputStream {
   }
 
   Status Init() {
+    //If the size of the file is less than 1GB dont do multipart
+
+    int size_enforced_key = metadata_ ? metadata_->FindKey("falkonry:write_options:file_size") : -1;
+    ARROW_LOG(DEBUG) << "!!! size_enforced_key = " << size_enforced_key;
+    if (size_enforced_key > -1) {
+      closed_ = true;
+      auto maybe_value = metadata_->value(size_enforced_key);
+      ARROW_LOG(DEBUG) << "!!! size_detected = " << maybe_value;
+      if (std::stoi(maybe_value) < (kMultipartThreshold  * 1024)) {
+        disable_mulitpart_ = true;
+        ARROW_LOG(DEBUG) << "!!! Non multipart upload";
+        closed_ = false;
+        return Status::OK();
+      }
+    }
+    ARROW_LOG(DEBUG) << "!!! multipart upload";
+    disable_mulitpart_ = false;
+
     // Initiate the multi-part upload
     S3Model::CreateMultipartUploadRequest req;
     req.SetBucket(ToAwsString(path_.bucket));
@@ -1210,7 +1231,8 @@ class ObjectOutputStream final : public io::OutputStream {
   }
 
   Status Abort() override {
-    if (closed_) {
+    ARROW_LOG(DEBUG) << "!!! Abort upload";
+    if (closed_ || disable_mulitpart_) {
       return Status::OK();
     }
 
@@ -1235,11 +1257,13 @@ class ObjectOutputStream final : public io::OutputStream {
   // OutputStream interface
 
   Status Close() override {
+    ARROW_LOG(DEBUG) << "!!! Close upload";
     auto fut = CloseAsync();
     return fut.status();
   }
 
   Future<> CloseAsync() override {
+    ARROW_LOG(DEBUG) << "!!! Close upload";
     if (closed_) return Status::OK();
 
     if (current_part_) {
@@ -1247,6 +1271,10 @@ class ObjectOutputStream final : public io::OutputStream {
       RETURN_NOT_OK(CommitCurrentPart());
     }
 
+    if(disable_mulitpart_)
+      return Status::OK();
+
+    ARROW_LOG(DEBUG) << "!!! Close Multipart upload";
     // S3 mandates at least one part, upload an empty one if necessary
     if (part_number_ == 1) {
       RETURN_NOT_OK(UploadPart("", 0));
@@ -1300,6 +1328,21 @@ class ObjectOutputStream final : public io::OutputStream {
 
   Status DoWrite(const void* data, int64_t nbytes,
                  std::shared_ptr<Buffer> owned_buffer = nullptr) {
+    if(disable_mulitpart_) {
+      ARROW_LOG(DEBUG) << "!!! Buffering Non-Multipart upload";
+      if (!current_part_) {
+        ARROW_ASSIGN_OR_RAISE(
+            current_part_,
+            io::BufferOutputStream::Create(part_upload_threshold_, io_context_.pool()));
+        current_part_size_ = 0;
+      }
+      RETURN_NOT_OK(current_part_->Write(data, nbytes));
+      pos_ += nbytes;
+      current_part_size_ += nbytes;
+      return Status::OK();
+    }
+
+    ARROW_LOG(DEBUG) << "!!! Multipart upload";
     if (closed_) {
       return Status::Invalid("Operation on closed stream");
     }
@@ -1359,51 +1402,67 @@ class ObjectOutputStream final : public io::OutputStream {
 
   Status UploadPart(const void* data, int64_t nbytes,
                     std::shared_ptr<Buffer> owned_buffer = nullptr) {
-    S3Model::UploadPartRequest req;
-    req.SetBucket(ToAwsString(path_.bucket));
-    req.SetKey(ToAwsString(path_.key));
-    req.SetUploadId(upload_id_);
-    req.SetPartNumber(part_number_);
-    req.SetContentLength(nbytes);
-
-    if (!background_writes_) {
+    if(disable_mulitpart_) {
+      ARROW_LOG(DEBUG) << "!!! Non multipart upload finalizing";
+      S3Model::PutObjectRequest req;
+      req.SetBucket(ToAwsString(path_.bucket));
+      req.SetKey(ToAwsString(path_.key));
       req.SetBody(std::make_shared<StringViewStream>(data, nbytes));
-      auto outcome = client_->UploadPart(req);
+      auto outcome = client_->PutObject(std::move(req));
       if (!outcome.IsSuccess()) {
-        return UploadPartError(req, outcome);
-      } else {
-        AddCompletedPart(upload_state_, part_number_, outcome.GetResult());
+        return ErrorToStatus(
+          std::forward_as_tuple("When uploading part for key '", req.GetKey(),
+            "' in bucket '", req.GetBucket(), "': "),
+            "PutObject", outcome.GetError());
       }
     } else {
-      // If the data isn't owned, make an immutable copy for the lifetime of the closure
-      if (owned_buffer == nullptr) {
-        ARROW_ASSIGN_OR_RAISE(owned_buffer, AllocateBuffer(nbytes, io_context_.pool()));
-        memcpy(owned_buffer->mutable_data(), data, nbytes);
-      } else {
-        DCHECK_EQ(data, owned_buffer->data());
-        DCHECK_EQ(nbytes, owned_buffer->size());
-      }
-      req.SetBody(
-          std::make_shared<StringViewStream>(owned_buffer->data(), owned_buffer->size()));
+      ARROW_LOG(DEBUG) << "!!! multipart upload intermediate";
+      S3Model::UploadPartRequest req;
+      req.SetBucket(ToAwsString(path_.bucket));
+      req.SetKey(ToAwsString(path_.key));
+      req.SetUploadId(upload_id_);
+      req.SetPartNumber(part_number_);
+      req.SetContentLength(nbytes);
 
-      {
-        std::unique_lock<std::mutex> lock(upload_state_->mutex);
-        if (upload_state_->parts_in_progress++ == 0) {
-          upload_state_->pending_parts_completed = Future<>::Make();
+      if (!background_writes_) {
+        req.SetBody(std::make_shared<StringViewStream>(data, nbytes));
+        auto outcome = client_->UploadPart(req);
+        if (!outcome.IsSuccess()) {
+          return UploadPartError(req, outcome);
+        } else {
+          AddCompletedPart(upload_state_, part_number_, outcome.GetResult());
         }
+      } else {
+        // If the data isn't owned, make an immutable copy for the lifetime of the closure
+        if (owned_buffer == nullptr) {
+          ARROW_ASSIGN_OR_RAISE(owned_buffer, AllocateBuffer(nbytes, io_context_.pool()));
+          memcpy(owned_buffer->mutable_data(), data, nbytes);
+        } else {
+          DCHECK_EQ(data, owned_buffer->data());
+          DCHECK_EQ(nbytes, owned_buffer->size());
+        }
+        req.SetBody(
+            std::make_shared<StringViewStream>(owned_buffer->data(), owned_buffer->size()));
+
+        {
+          std::unique_lock<std::mutex> lock(upload_state_->mutex);
+          if (upload_state_->parts_in_progress++ == 0) {
+            upload_state_->pending_parts_completed = Future<>::Make();
+          }
+        }
+        auto client = client_;
+        ARROW_ASSIGN_OR_RAISE(auto fut, SubmitIO(io_context_, [client, req]() {
+                                return client->UploadPart(req);
+                              }));
+        // The closure keeps the buffer and the upload state alive
+        auto state = upload_state_;
+        auto part_number = part_number_;
+        auto handler = [owned_buffer, state, part_number,
+                        req](const Result<S3Model::UploadPartOutcome>& result) -> void {
+          HandleUploadOutcome(state, part_number, req, result);
+        };
+        fut.AddCallback(std::move(handler));
       }
-      auto client = client_;
-      ARROW_ASSIGN_OR_RAISE(auto fut, SubmitIO(io_context_, [client, req]() {
-                              return client->UploadPart(req);
-                            }));
-      // The closure keeps the buffer and the upload state alive
-      auto state = upload_state_;
-      auto part_number = part_number_;
-      auto handler = [owned_buffer, state, part_number,
-                      req](const Result<S3Model::UploadPartOutcome>& result) -> void {
-        HandleUploadOutcome(state, part_number, req, result);
-      };
-      fut.AddCallback(std::move(handler));
     }
 
     ++part_number_;
@@ -1478,6 +1537,7 @@ class ObjectOutputStream final : public io::OutputStream {
 
   Aws::String upload_id_;
   bool closed_ = true;
+  bool disable_mulitpart_ = false;
   int64_t pos_ = 0;
   int32_t part_number_ = 1;
   std::shared_ptr<io::BufferOutputStream> current_part_;
@@ -2285,20 +2345,26 @@ Result<FileInfo> S3FileSystem::GetFileInfo(const std::string& s) {
       return ErrorToStatus(msg, "HeadObject", outcome.GetError(),
                            impl_->options().region);
     }
-    // Not found => perhaps it's an empty "directory"
-    ARROW_ASSIGN_OR_RAISE(bool is_dir, impl_->IsEmptyDirectory(path, &outcome));
-    if (is_dir) {
-      info.set_type(FileType::Directory);
+    auto maybe_env_var = GetEnvVarNative("ARROW_S3_OPTIMIZED_KEY_LOOKUP");
+    if (maybe_env_var.ok()) {
+      info.set_type(FileType::NotFound);
+      return info;
+    } else {
+      // Not found => perhaps it's an empty "directory"
+      ARROW_ASSIGN_OR_RAISE(bool is_dir, impl_->IsEmptyDirectory(path, &outcome));
+      if (is_dir) {
+        info.set_type(FileType::Directory);
+        return info;
+      }
+      // Not found => perhaps it's a non-empty "directory"
+      ARROW_ASSIGN_OR_RAISE(is_dir, impl_->IsNonEmptyDirectory(path));
+      if (is_dir) {
+        info.set_type(FileType::Directory);
+      } else {
+        info.set_type(FileType::NotFound);
+      }
       return info;
     }
-    // Not found => perhaps it's a non-empty "directory"
-    ARROW_ASSIGN_OR_RAISE(is_dir, impl_->IsNonEmptyDirectory(path));
-    if (is_dir) {
-      info.set_type(FileType::Directory);
-    } else {
-      info.set_type(FileType::NotFound);
-    }
-    return info;
   }
 }
 
@@ -2691,7 +2757,32 @@ Status InitializeS3(const S3GlobalOptions& options) {
 }
 
 Status EnsureS3Initialized() {
-  return EnsureAwsInstanceInitialized({S3LogLevel::Fatal}).status();
+  auto log_level = S3LogLevel::Fatal;
+
+  auto result = arrow::internal::GetEnvVar("ARROW_S3_LOG_LEVEL");
+
+  if (result.ok()) {
+    // Extract, trim, and downcase the value of the enivronment variable
+    auto value =
+        arrow::internal::AsciiToLower(arrow::internal::TrimString(result.ValueUnsafe()));
+
+    if (value == "fatal") {
+      log_level = S3LogLevel::Fatal;
+    } else if (value == "error") {
+      log_level = S3LogLevel::Error;
+    } else if (value == "warn") {
+      log_level = S3LogLevel::Warn;
+    } else if (value == "info") {
+      log_level = S3LogLevel::Info;
+    } else if (value == "debug") {
+      log_level = S3LogLevel::Debug;
+    } else if (value == "trace") {
+      log_level = S3LogLevel::Trace;
+    } else if (value == "off") {
+      log_level = S3LogLevel::Off;
+    }
+  }  
+  return EnsureAwsInstanceInitialized({log_level}).status();
 }
 
 Status FinalizeS3() {

@@ -958,6 +958,7 @@ Examples
                  encryption_properties=None,
                  write_batch_size=None,
                  dictionary_pagesize_limit=None,
+                 file_size=None,
                  store_schema=True,
                  **options):
         if use_deprecated_int96_timestamps is None:
@@ -992,8 +993,12 @@ Examples
                 # ARROW-10480: do not auto-detect compression.  While
                 # a filename like foo.parquet.gz is nonconforming, it
                 # shouldn't implicitly apply compression.
+                if file_size is not None:
+                    metadata = {'falkonry:write_options:file_size': file_size}
+                else:
+                    metadata = None
                 sink = self.file_handle = filesystem.open_output_stream(
-                    path, compression=None)
+                    path, compression=None, metadata=metadata)
         else:
             sink = where
         self._metadata_collector = options.pop('metadata_collector', None)
