@@ -21,12 +21,12 @@ set -e
 #----------------------------------------------------------------------
 # Change this to whatever makes sense for your system
 
-HOME=
+HOME=/io/dist
 MINICONDA=$HOME/miniconda-for-arrow
 LIBRARY_INSTALL_DIR=$HOME/local-libs
 CPP_BUILD_DIR=$HOME/arrow-cpp-build
 ARROW_ROOT=/arrow
-PYTHON=3.10
+PYTHON=3.9
 
 git config --global --add safe.directory $ARROW_ROOT
 
@@ -75,19 +75,7 @@ export ARROW_HOME=$CONDA_PREFIX
 mkdir -p $CPP_BUILD_DIR
 pushd $CPP_BUILD_DIR
 
-cmake -GNinja \
-      -DCMAKE_BUILD_TYPE=DEBUG \
-      -DCMAKE_INSTALL_PREFIX=$ARROW_HOME \
-      -DCMAKE_INSTALL_LIBDIR=lib \
-      -DARROW_WITH_BZ2=ON \
-      -DARROW_WITH_ZLIB=ON \
-      -DARROW_WITH_ZSTD=ON \
-      -DARROW_WITH_LZ4=ON \
-      -DARROW_WITH_SNAPPY=ON \
-      -DARROW_WITH_BROTLI=ON \
-      -DARROW_PYTHON=ON \
-      $ARROW_ROOT/cpp
-
+cmake --preset ninja-release-python-maximal -DCMAKE_INSTALL_PREFIX=$ARROW_HOME $ARROW_ROOT/cpp 
 ninja install
 
 popd
@@ -99,12 +87,15 @@ pushd $ARROW_ROOT/python
 rm -rf build/  # remove any pesky pre-existing build directory
 
 export CMAKE_PREFIX_PATH=${ARROW_HOME}${CMAKE_PREFIX_PATH:+:${CMAKE_PREFIX_PATH}}
-export PYARROW_BUILD_TYPE=Debug
+export PYARROW_BUILD_TYPE=RELEASE
 export PYARROW_CMAKE_GENERATOR=Ninja
 
 # You can run either "develop" or "build_ext --inplace". Your pick
 
-# python setup.py build_ext --inplace
-python setup.py develop
+pip install wheel  # if not installed
+python setup.py build_ext --build-type=$PYARROW_BUILD_TYPE \
+         --bundle-arrow-cpp bdist_wheel --dist-dir $HOME
 
-py.test pyarrow
+#python setup.py develop
+
+#py.test pyarrow
