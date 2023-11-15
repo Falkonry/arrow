@@ -159,10 +159,7 @@
     {
       "name": "features-python-maximal",
       "inherits": [
-        "features-cuda",
         "features-filesystems",
-        "features-flight-sql",
-        "features-gandiva",
         "features-main",
         "features-python-minimal"
       ],
