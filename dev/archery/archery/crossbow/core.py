@@ -759,7 +759,8 @@ def get_version(root, **kwargs):
     if 'dev' not in tag:
         major += 1
 
-    return "{}.{}.{}.dev{}".format(major, minor, patch, version.distance or 0)
+    #return "{}.{}.{}.dev{}".format(major, minor, patch, version.distance or 0)
+    return "{}.{}.{}".format(major, minor, patch)
 
 
 class Serializable:

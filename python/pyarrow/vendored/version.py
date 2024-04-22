@@ -361,8 +361,8 @@ class Version(_BaseVersion):
             parts.append(f".dev{self.dev}")
 
         # Local version segment
-        if self.local is not None:
-            parts.append(f"+{self.local}")
+        # if self.local is not None:
+        #     parts.append(f"+{self.local}")
 
         return "".join(parts)
 

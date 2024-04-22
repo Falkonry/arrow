@@ -408,11 +408,6 @@ class build_ext(_build_ext):
 # If the event of not running from a git clone (e.g. from a git archive
 # or a Python sdist), see if we can set the version number ourselves
 default_version = '14.0.1'
-if (not os.path.exists('../.git') and
-        not os.environ.get('SETUPTOOLS_SCM_PRETEND_VERSION')):
-    os.environ['SETUPTOOLS_SCM_PRETEND_VERSION'] = \
-        default_version.replace('-SNAPSHOT', 'a0')
-
 
 # See https://github.com/pypa/setuptools_scm#configuration-parameters
 scm_version_write_to_prefix = os.environ.get(
@@ -431,12 +426,7 @@ def parse_git(root, **kwargs):
 
 
 def guess_next_dev_version(version):
-    if version.exact:
-        return version.format_with('{tag}')
-    else:
-        def guess_next_version(tag_version):
-            return default_version.replace('-SNAPSHOT', '')
-        return version.format_next_version(guess_next_version)
+    return '14.0.1'
 
 
 with open('README.md') as f:
@@ -444,6 +434,7 @@ with open('README.md') as f:
 
 
 class BinaryDistribution(Distribution):
+    version = "14.0.1"
     def has_ext_modules(foo):
         return True
 
@@ -485,13 +476,7 @@ setup(
     cmdclass={
         'build_ext': build_ext
     },
-    use_scm_version={
-        'root': os.path.dirname(setup_dir),
-        'parse': parse_git,
-        'write_to': os.path.join(scm_version_write_to_prefix,
-                                 'pyarrow/_generated_version.py'),
-        'version_scheme': guess_next_dev_version
-    },
+    version="14.0.1",
     setup_requires=['setuptools_scm < 8.0.0', 'cython >= 0.29.31'] + setup_requires,
     install_requires=install_requires,
     tests_require=['pytest', 'pandas', 'hypothesis'],

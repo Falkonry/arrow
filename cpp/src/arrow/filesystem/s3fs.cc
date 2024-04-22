@@ -1101,11 +1101,13 @@ Aws::IOStreamFactory AwsWriteableStreamFactory(void* data, int64_t nbytes) {
 }
 
 Result<S3Model::GetObjectResult> GetObjectRange(Aws::S3::S3Client* client,
-                                                const S3Path& path, int64_t start,
-                                                int64_t length, void* out) {
+                                                const S3Path& path, const Aws::String& version,
+                                                int64_t start, int64_t length, void* out) {
   S3Model::GetObjectRequest req;
   req.SetBucket(ToAwsString(path.bucket));
   req.SetKey(ToAwsString(path.key));
+  if(!version.empty())
+    req.SetVersionId(version);
   req.SetRange(ToAwsString(FormatRange(start, length)));
   req.SetResponseStreamFactory(AwsWriteableStreamFactory(out, length));
   return OutcomeToResult("GetObject", client->GetObject(req));
@@ -1243,6 +1245,8 @@ class ObjectInputFile final : public io::RandomAccessFile {
       }
     }
     content_length_ = outcome.GetResult().GetContentLength();
+    if(!outcome.GetResult().GetVersionId().empty())
+      version_ = outcome.GetResult().GetVersionId();
     DCHECK_GE(content_length_, 0);
     metadata_ = GetObjectMetadata(outcome.GetResult());
     return Status::OK();
@@ -1315,7 +1319,7 @@ class ObjectInputFile final : public io::RandomAccessFile {
     ARROW_ASSIGN_OR_RAISE(auto client_lock, holder_->Lock());
     ARROW_ASSIGN_OR_RAISE(
         S3Model::GetObjectResult result,
-        GetObjectRange(client_lock.get(), path_, position, nbytes, out));
+        GetObjectRange(client_lock.get(), path_, version_, position, nbytes, out));
 
     auto& stream = result.GetBody();
     stream.ignore(nbytes);
@@ -1358,9 +1362,11 @@ class ObjectInputFile final : public io::RandomAccessFile {
   const io::IOContext io_context_;
   S3Path path_;
 
+
   bool closed_ = false;
   int64_t pos_ = 0;
   int64_t content_length_ = kNoSize;
+  Aws::String version_;
   std::shared_ptr<const KeyValueMetadata> metadata_;
 };
 
@@ -1659,6 +1665,7 @@ class ObjectOutputStream final : public io::OutputStream {
       req.SetBody(std::make_shared<StringViewStream>(data, nbytes));
       ARROW_ASSIGN_OR_RAISE(auto client_lock, holder_->Lock());
       auto outcome = client_lock.Move()->PutObject(std::move(req));
+      outcome.GetResult().GetVersionId();
       if (!outcome.IsSuccess()) {
         return ErrorToStatus(
           std::forward_as_tuple("When uploading part for key '", req.GetKey(),
