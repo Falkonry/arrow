@@ -2617,7 +2617,11 @@ macro(build_zlib)
 endmacro()
 
 if(ARROW_WITH_ZLIB)
+  # Force ZLIB to use system package instead of building from source
+  set(ZLIB_SOURCE "SYSTEM")
   resolve_dependency(ZLIB PC_PACKAGE_NAMES zlib)
+  # Mark ZLIB as not vendored when using system package
+  set(ZLIB_VENDORED FALSE)
 endif()
 
 function(build_lz4)
@@ -4633,18 +4637,29 @@ function(build_orc)
     set(ORC_PREFER_STATIC_ZLIB
         OFF
         CACHE BOOL "" FORCE)
-    get_target_property(ZLIB_INCLUDE_DIR ZLIB::ZLIB INTERFACE_INCLUDE_DIRECTORIES)
-    get_filename_component(ZLIB_ROOT "${ZLIB_INCLUDE_DIR}" DIRECTORY)
-    set(ZLIB_HOME
-        ${ZLIB_ROOT}
-        CACHE STRING "" FORCE)
-    # From CMake 3.21 onwards the set(CACHE) command does not remove any normal
-    # variable of the same name from the current scope. We have to manually remove
-    # the variable via unset to avoid ORC not finding the ZLIB_LIBRARY.
-    unset(ZLIB_LIBRARY)
-    set(ZLIB_LIBRARY
-        ZLIB::ZLIB
-        CACHE STRING "" FORCE)
+    if(ZLIB_VENDORED)
+      get_target_property(ZLIB_INCLUDE_DIR ZLIB::ZLIB INTERFACE_INCLUDE_DIRECTORIES)
+      get_filename_component(ZLIB_ROOT "${ZLIB_INCLUDE_DIR}" DIRECTORY)
+      set(ZLIB_HOME
+          ${ZLIB_ROOT}
+          CACHE STRING "" FORCE)
+      # From CMake 3.21 onwards the set(CACHE) command does not remove any normal
+      # variable of the same name from the current scope. We have to manually remove
+      # the variable via unset to avoid ORC not finding the ZLIB_LIBRARY.
+      unset(ZLIB_LIBRARY)
+      set(ZLIB_LIBRARY
+          ZLIB::ZLIB
+          CACHE STRING "" FORCE)
+    else()
+      # For system ZLIB, use standard paths
+      set(ZLIB_HOME
+          "/usr"
+          CACHE STRING "" FORCE)
+      unset(ZLIB_LIBRARY)
+      set(ZLIB_LIBRARY
+          "/usr/lib64/libz.so"
+          CACHE STRING "" FORCE)
+    endif()
 
     set(ORC_PREFER_STATIC_ZSTD
         OFF
@@ -4701,8 +4716,13 @@ function(build_orc)
     get_target_property(ORC_ZSTD_ROOT ${ARROW_ZSTD_LIBZSTD} INTERFACE_INCLUDE_DIRECTORIES)
     get_filename_component(ORC_ZSTD_ROOT "${ORC_ZSTD_ROOT}" DIRECTORY)
 
-    get_target_property(ORC_ZLIB_ROOT ZLIB::ZLIB INTERFACE_INCLUDE_DIRECTORIES)
-    get_filename_component(ORC_ZLIB_ROOT "${ORC_ZLIB_ROOT}" DIRECTORY)
+    if(ZLIB_VENDORED)
+      get_target_property(ORC_ZLIB_ROOT ZLIB::ZLIB INTERFACE_INCLUDE_DIRECTORIES)
+      get_filename_component(ORC_ZLIB_ROOT "${ORC_ZLIB_ROOT}" DIRECTORY)
+    else()
+      # For system ZLIB, use standard paths
+      set(ORC_ZLIB_ROOT "/usr")
+    endif()
 
     set(ORC_CMAKE_ARGS
         ${EP_COMMON_CMAKE_ARGS}
@@ -4728,9 +4748,16 @@ function(build_orc)
         "-DZSTD_HOME=${ORC_ZSTD_ROOT}"
         "-DZSTD_INCLUDE_DIR=$<TARGET_PROPERTY:${ARROW_ZSTD_LIBZSTD},INTERFACE_INCLUDE_DIRECTORIES>"
         "-DZSTD_LIBRARY=$<TARGET_FILE:${ARROW_ZSTD_LIBZSTD}>"
-        "-DZLIB_HOME=${ORC_ZLIB_ROOT}"
+        "-DZLIB_HOME=${ORC_ZLIB_ROOT}")
+    if(ZLIB_VENDORED)
+      list(APPEND ORC_CMAKE_ARGS
         "-DZLIB_INCLUDE_DIR=$<TARGET_PROPERTY:ZLIB::ZLIB,INTERFACE_INCLUDE_DIRECTORIES>"
         "-DZLIB_LIBRARY=$<TARGET_FILE:ZLIB::ZLIB>")
+    else()
+      list(APPEND ORC_CMAKE_ARGS
+        "-DZLIB_INCLUDE_DIR=/usr/include"
+        "-DZLIB_LIBRARY=/usr/lib64/libz.so")
+    endif()
 
     # Work around CMake bug
     file(MAKE_DIRECTORY ${ORC_INCLUDE_DIR})
@@ -5160,12 +5187,21 @@ function(build_awssdk)
       OFF
       CACHE BOOL "" FORCE)
   if(NOT WIN32)
-    set(ZLIB_INCLUDE_DIR
-        "$<TARGET_PROPERTY:ZLIB::ZLIB,INTERFACE_INCLUDE_DIRECTORIES>"
-        CACHE STRING "" FORCE)
-    set(ZLIB_LIBRARY
-        "$<TARGET_FILE:ZLIB::ZLIB>"
-        CACHE STRING "" FORCE)
+    if(ZLIB_VENDORED)
+      set(ZLIB_INCLUDE_DIR
+          "$<TARGET_PROPERTY:ZLIB::ZLIB,INTERFACE_INCLUDE_DIRECTORIES>"
+          CACHE STRING "" FORCE)
+      set(ZLIB_LIBRARY
+          "$<TARGET_FILE:ZLIB::ZLIB>"
+          CACHE STRING "" FORCE)
+    else()
+      set(ZLIB_INCLUDE_DIR
+          "/usr/include"
+          CACHE STRING "" FORCE)
+      set(ZLIB_LIBRARY
+          "/usr/lib64/libz.so"
+          CACHE STRING "" FORCE)
+    endif()
   endif()
   if(MINGW AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS "9")
     # This is for RTools 40. We can remove this after we dropped
