@@ -131,6 +131,7 @@ using ::arrow::internal::TaskGroup;
 using ::arrow::internal::ToChars;
 using ::arrow::io::internal::SubmitIO;
 using ::arrow::util::Uri;
+using arrow::internal::GetEnvVarNative;
 
 using internal::ConnectRetryStrategy;
 using internal::DetectS3Backend;
@@ -3138,20 +3139,26 @@ Result<FileInfo> S3FileSystem::GetFileInfo(const std::string& s) {
       return ErrorToStatus(msg, "HeadObject", outcome.GetError(),
                            impl_->options().region);
     }
-    // Not found => perhaps it's an empty "directory"
-    ARROW_ASSIGN_OR_RAISE(bool is_dir, impl_->IsEmptyDirectory(path, &outcome));
-    if (is_dir) {
-      info.set_type(FileType::Directory);
+    auto maybe_env_var = GetEnvVarNative("ARROW_S3_OPTIMIZED_KEY_LOOKUP");
+    if (maybe_env_var.ok()) {
+      info.set_type(FileType::NotFound);
+      return info;
+    } else {
+      // Not found => perhaps it's an empty "directory"
+      ARROW_ASSIGN_OR_RAISE(bool is_dir, impl_->IsEmptyDirectory(path, &outcome));
+      if (is_dir) {
+        info.set_type(FileType::Directory);
+        return info;
+      }
+      // Not found => perhaps it's a non-empty "directory"
+      ARROW_ASSIGN_OR_RAISE(is_dir, impl_->IsNonEmptyDirectory(path));
+      if (is_dir) {
+        info.set_type(FileType::Directory);
+      } else {
+        info.set_type(FileType::NotFound);
+      }
       return info;
     }
-    // Not found => perhaps it's a non-empty "directory"
-    ARROW_ASSIGN_OR_RAISE(is_dir, impl_->IsNonEmptyDirectory(path));
-    if (is_dir) {
-      info.set_type(FileType::Directory);
-    } else {
-      info.set_type(FileType::NotFound);
-    }
-    return info;
   }
 }
 
