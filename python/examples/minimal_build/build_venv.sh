@@ -34,7 +34,7 @@ export PYARROW_WITH_DATASET=1
 export PYARROW_PARALLEL=4
 
 # Override version to create release build instead of dev build
-export SETUPTOOLS_SCM_PRETEND_VERSION=21.0.1
+export SETUPTOOLS_SCM_PRETEND_VERSION=23.0.1
 
 python3 -m venv $WORKDIR/venv
 source $WORKDIR/venv/bin/activate

@@ -3059,6 +3059,8 @@ function(build_absl)
 
   prepare_fetchcontent()
 
+  # Unity build causes kAsciiToInt redefinition (numbers.cc vs charconv_parse.cc).
+  set(CMAKE_UNITY_BUILD OFF)
   # We have to enable Abseil install to add Abseil targets to an export set.
   # But we don't install Abseil by EXCLUDE_FROM_ALL.
   set(ABSL_ENABLE_INSTALL ON)
