@@ -130,6 +130,7 @@ using ::arrow::internal::TaskGroup;
 using ::arrow::internal::ToChars;
 using ::arrow::io::internal::SubmitIO;
 using ::arrow::util::Uri;
+using arrow::internal::GetEnvVarNative;
 
 using internal::ConnectRetryStrategy;
 using internal::DetectS3Backend;
@@ -1333,11 +1334,14 @@ Aws::IOStreamFactory AwsWriteableStreamFactory(void* data, int64_t nbytes) {
 Result<S3Model::GetObjectResult> GetObjectRange(Aws::S3::S3Client* client,
                                                 const S3Path& path,
                                                 const std::string& sse_customer_key,
+                                                const Aws::String& version,
                                                 int64_t start, int64_t length,
                                                 void* out) {
   S3Model::GetObjectRequest req;
   req.SetBucket(ToAwsString(path.bucket));
   req.SetKey(ToAwsString(path.key));
+  if(!version.empty())
+    req.SetVersionId(version);
   RETURN_NOT_OK(SetSSECustomerKey(&req, sse_customer_key));
   req.SetRange(ToAwsString(FormatRange(start, length)));
   req.SetResponseStreamFactory(AwsWriteableStreamFactory(out, length));
@@ -1510,6 +1514,8 @@ class ObjectInputFile final : public io::RandomAccessFile {
       }
     }
     content_length_ = outcome.GetResult().GetContentLength();
+    if(!outcome.GetResult().GetVersionId().empty())
+      version_ = outcome.GetResult().GetVersionId();
     DCHECK_GE(content_length_, 0);
     metadata_ = GetObjectMetadata(outcome.GetResult());
     return Status::OK();
@@ -1582,7 +1588,7 @@ class ObjectInputFile final : public io::RandomAccessFile {
     ARROW_ASSIGN_OR_RAISE(auto client_lock, holder_->Lock());
     ARROW_ASSIGN_OR_RAISE(S3Model::GetObjectResult result,
                           GetObjectRange(client_lock.get(), path_, sse_customer_key_,
-                                         position, nbytes, out));
+                                         version_, position, nbytes, out));
 
     auto& stream = result.GetBody();
     stream.ignore(nbytes);
@@ -1628,6 +1634,7 @@ class ObjectInputFile final : public io::RandomAccessFile {
   bool closed_ = false;
   int64_t pos_ = 0;
   int64_t content_length_ = kNoSize;
+  std::string version_;
   std::shared_ptr<const KeyValueMetadata> metadata_;
   std::string sse_customer_key_;
 };
@@ -3193,20 +3200,26 @@ Result<FileInfo> S3FileSystem::GetFileInfo(const std::string& s) {
       return ErrorToStatus(msg, "HeadObject", outcome.GetError(),
                            impl_->options().region);
     }
-    // Not found => perhaps it's an empty "directory"
-    ARROW_ASSIGN_OR_RAISE(bool is_dir, impl_->IsEmptyDirectory(path, &outcome));
-    if (is_dir) {
-      info.set_type(FileType::Directory);
+    auto maybe_env_var = GetEnvVarNative("ARROW_S3_OPTIMIZED_KEY_LOOKUP");
+    if (maybe_env_var.ok()) {
+      info.set_type(FileType::NotFound);
+      return info;
+    } else {
+      // Not found => perhaps it's an empty "directory"
+      ARROW_ASSIGN_OR_RAISE(bool is_dir, impl_->IsEmptyDirectory(path, &outcome));
+      if (is_dir) {
+        info.set_type(FileType::Directory);
+        return info;
+      }
+      // Not found => perhaps it's a non-empty "directory"
+      ARROW_ASSIGN_OR_RAISE(is_dir, impl_->IsNonEmptyDirectory(path));
+      if (is_dir) {
+        info.set_type(FileType::Directory);
+      } else {
+        info.set_type(FileType::NotFound);
+      }
       return info;
     }
-    // Not found => perhaps it's a non-empty "directory"
-    ARROW_ASSIGN_OR_RAISE(is_dir, impl_->IsNonEmptyDirectory(path));
-    if (is_dir) {
-      info.set_type(FileType::Directory);
-    } else {
-      info.set_type(FileType::NotFound);
-    }
-    return info;
   }
 }
 
