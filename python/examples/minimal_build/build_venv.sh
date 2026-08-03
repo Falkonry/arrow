@@ -87,31 +87,23 @@ ninja install
 popd
 
 #----------------------------------------------------------------------
-# Build and test Python library
+# Build Python wheel (Arrow 25+ uses scikit-build-core; no setup.py)
 pushd $ARROW_ROOT/python
 
 rm -rf build/  # remove any pesky preexisting build directory
 
 export CMAKE_PREFIX_PATH=${ARROW_HOME}${CMAKE_PREFIX_PATH:+:${CMAKE_PREFIX_PATH}}
-export PYARROW_BUILD_TYPE=Release
-export PYARROW_WITH_GCS=1 
+export PYARROW_WITH_GCS=1
 export PYARROW_WITH_PARQUET=1
 export PYARROW_WITH_DATASET=1
 export PYARROW_WITH_S3=1
 export PYARROW_WITH_ORC=1
 export PYARROW_WITH_PARQUET_ENCRYPTION=1
 export PYARROW_WITH_HDFS=1
+export PYARROW_BUNDLE_ARROW_CPP=ON
 export CMAKE_GENERATOR=Ninja
 
-# # Use the same command that we use on python_build.sh
-# python -m pip install --no-deps --no-build-isolation -vv -C cmake.build-type=Debug .
+pip install build wheel
+python -m build --wheel --no-isolation --outdir "$HOME"
 
-# popd
-
-# pip install -r $ARROW_ROOT/python/requirements-test.txt
-
-# pytest -vv -r s ${PYTEST_ARGS} --pyargs pyarrow
-
-pip install wheel  # if not installed
-python setup.py build_ext --build-type=$PYARROW_BUILD_TYPE \
-         --bundle-arrow-cpp bdist_wheel --dist-dir $HOME
+popd
