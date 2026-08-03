@@ -15,11 +15,12 @@
 # specific language governing permissions and limitations
 # under the License.
 
-FROM registry.access.redhat.com/ubi9/python-312
+FROM registry.access.redhat.com/ubi9/python-311
 
 USER 0
 
-RUN dnf update -y && \
+# --allowerasing: UBI repos can temporarily skew glibc vs glibc-langpack versions
+RUN dnf update -y --allowerasing && \
     dnf install -y \
         autoconf \
         gcc \
